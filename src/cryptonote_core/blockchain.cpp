@@ -1265,7 +1265,7 @@ uint64_t Blockchain::get_current_cumulative_block_weight_median() const
 // in a lot of places.  That flag is not referenced in any of the code
 // nor any of the makefiles, howeve.  Need to look into whether or not it's
 // necessary at all.
-bool Blockchain::create_block_template(block& b, const account_public_address& miner_address, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce)
+bool Blockchain::create_block_template(block& b, const std::vector<std::pair<account_public_address, float>>& miner_addresses, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce)
 {
   LOG_PRINT_L3("Blockchain::" << __func__);
   size_t median_weight;
@@ -1281,7 +1281,7 @@ bool Blockchain::create_block_template(block& b, const account_public_address& m
     // just as we compare it, we'll just use a slightly old template, but
     // this would be the case anyway if we'd lock, and the change happened
     // just after the block template was created
-    if (!memcmp(&miner_address, &m_btc_address, sizeof(cryptonote::account_public_address)) && m_btc_nonce == ex_nonce && m_btc_pool_cookie == m_tx_pool.cookie()) {
+    if (miner_addresses == m_btc_addresses && m_btc_nonce == ex_nonce && m_btc_pool_cookie == m_tx_pool.cookie()) {
       MDEBUG("Using cached template");
       m_btc.timestamp = time(NULL); // update timestamp unconditionally
       b = m_btc;
@@ -1289,7 +1289,7 @@ bool Blockchain::create_block_template(block& b, const account_public_address& m
       expected_reward = m_btc_expected_reward;
       return true;
     }
-    MDEBUG("Not using cached template: address " << (!memcmp(&miner_address, &m_btc_address, sizeof(cryptonote::account_public_address))) << ", nonce " << (m_btc_nonce == ex_nonce) << ", cookie " << (m_btc_pool_cookie == m_tx_pool.cookie()));
+    MDEBUG("Not using cached template: addresses " << (miner_addresses == m_btc_addresses) << ", nonce " << (m_btc_nonce == ex_nonce) << ", cookie " << (m_btc_pool_cookie == m_tx_pool.cookie()));
     invalidate_block_template_cache();
   }
 
@@ -1377,7 +1377,15 @@ bool Blockchain::create_block_template(block& b, const account_public_address& m
   //make blocks coin-base tx looks close to real coinbase tx to get truthful blob weight
   uint8_t hf_version = m_hardfork->get_current_version();
   size_t max_outs = hf_version >= 4 ? 1 : 11;
-  bool r = construct_miner_tx(height, median_weight, already_generated_coins, txs_weight, fee, miner_address, b.miner_tx, ex_nonce, max_outs, hf_version);
+  size_t miner_count = miner_addresses.size();
+  bool r;
+  if (miner_count == 1)
+      r = construct_miner_tx(height, median_weight, already_generated_coins, txs_weight, fee, miner_addresses[0].first, b.miner_tx, ex_nonce, max_outs, hf_version);
+  else
+  {
+      max_outs = 999;
+      r = construct_miner_tx(height, median_weight, already_generated_coins, txs_weight, fee, miner_addresses, b.miner_tx, ex_nonce, max_outs, hf_version);
+  }
   CHECK_AND_ASSERT_MES(r, false, "Failed to construct miner tx, first chance");
   size_t cumulative_weight = txs_weight + get_transaction_weight(b.miner_tx);
 #if defined(DEBUG_CREATE_BLOCK_TEMPLATE)
@@ -1386,7 +1394,10 @@ bool Blockchain::create_block_template(block& b, const account_public_address& m
 #endif
   for (size_t try_count = 0; try_count != 10; ++try_count)
   {
-    r = construct_miner_tx(height, median_weight, already_generated_coins, cumulative_weight, fee, miner_address, b.miner_tx, ex_nonce, max_outs, hf_version);
+    if (miner_count == 1)
+        r = construct_miner_tx(height, median_weight, already_generated_coins, cumulative_weight, fee, miner_addresses[0].first, b.miner_tx, ex_nonce, max_outs, hf_version);
+    else
+        r = construct_miner_tx(height, median_weight, already_generated_coins, cumulative_weight, fee, miner_addresses, b.miner_tx, ex_nonce, max_outs, hf_version);
 
     CHECK_AND_ASSERT_MES(r, false, "Failed to construct miner tx, second chance");
     size_t coinbase_weight = get_transaction_weight(b.miner_tx);
@@ -1430,11 +1441,16 @@ bool Blockchain::create_block_template(block& b, const account_public_address& m
         ", cumulative weight " << cumulative_weight << " is now good");
 #endif
 
-    cache_block_template(b, miner_address, ex_nonce, diffic, expected_reward, pool_cookie);
+    cache_block_template(b, miner_addresses, ex_nonce, diffic, expected_reward, pool_cookie);
     return true;
   }
   LOG_ERROR("Failed to create_block_template with " << 10 << " tries");
   return false;
+}
+bool Blockchain::create_block_template(block& b, const account_public_address& miner_address, difficulty_type& diffic, uint64_t& height, uint64_t& expected_reward, const blobdata& ex_nonce)
+{
+    std::vector<std::pair<account_public_address, float>> miners (1, std::make_pair(miner_address, 1.0f));
+    return create_block_template(b, miners, diffic, height, expected_reward, ex_nonce);
 }
 //------------------------------------------------------------------
 // for an alternate chain, get the timestamps from the main chain to complete
@@ -4650,16 +4666,22 @@ void Blockchain::invalidate_block_template_cache()
   m_btc_valid = false;
 }
 
-void Blockchain::cache_block_template(const block &b, const cryptonote::account_public_address &address, const blobdata &nonce, const difficulty_type &diff, uint64_t expected_reward, uint64_t pool_cookie)
+void Blockchain::cache_block_template(const block &b, const std::vector<std::pair<cryptonote::account_public_address, float>> &addresses, const blobdata &nonce, const difficulty_type &diff, uint64_t expected_reward, uint64_t pool_cookie)
 {
   MDEBUG("Setting block template cache");
   m_btc = b;
-  m_btc_address = address;
+  m_btc_addresses = addresses;
   m_btc_nonce = nonce;
   m_btc_difficulty = diff;
   m_btc_expected_reward = expected_reward;
   m_btc_pool_cookie = pool_cookie;
   m_btc_valid = true;
+}
+
+void Blockchain::cache_block_template(const block &b, const cryptonote::account_public_address &address, const blobdata &nonce, const difficulty_type &diff, uint64_t expected_reward, uint64_t pool_cookie)
+{
+    std::vector<std::pair<cryptonote::account_public_address, float>> addresses (1, std::make_pair(address, 1.0f));
+    cache_block_template(b, addresses, nonce, diff, expected_reward, pool_cookie);
 }
 
 namespace cryptonote {

@@ -1067,25 +1067,43 @@ namespace cryptonote
       return false;
     }
 
-    cryptonote::address_parse_info info;
-
-    if(!req.wallet_address.size() || !cryptonote::get_account_address_from_str(info, nettype(), req.wallet_address))
+    if(req.wallet_address.empty())
     {
       error_resp.code = CORE_RPC_ERROR_CODE_WRONG_WALLET_ADDRESS;
-      error_resp.message = "Failed to parse wallet address";
+      error_resp.message = "Empty wallet address";
       return false;
     }
-    if (info.is_subaddress)
+
+    std::vector<std::pair<cryptonote::account_public_address, float>> split_coinbase;
+    std::istringstream iss(req.wallet_address);
+    std::string addr, share;
+    while (std::getline(iss, addr, ','))
     {
-      error_resp.code = CORE_RPC_ERROR_CODE_MINING_TO_SUBADDRESS;
-      error_resp.message = "Mining to subaddress is not supported yet";
-      return false;
+      cryptonote::address_parse_info info;
+
+      if(!addr.size() || !cryptonote::get_account_address_from_str(info, nettype(), addr))
+      {
+        error_resp.code = CORE_RPC_ERROR_CODE_WRONG_WALLET_ADDRESS;
+        error_resp.message = "Failed to parse wallet address";
+        return false;
+      }
+      if (info.is_subaddress)
+      {
+        error_resp.code = CORE_RPC_ERROR_CODE_MINING_TO_SUBADDRESS;
+        error_resp.message = "Mining to subaddress is not supported yet";
+        return false;
+      }
+
+      if (!std::getline(iss, share, ','))
+        share = "1.0";
+
+      split_coinbase.push_back(std::make_pair(info.address, std::stof(share)));
     }
 
     block b;
     cryptonote::blobdata blob_reserve;
     blob_reserve.resize(req.reserve_size, 0);
-    if(!m_core.get_block_template(b, info.address, res.difficulty, res.height, res.expected_reward, blob_reserve))
+    if(!m_core.get_block_template(b, split_coinbase, res.difficulty, res.height, res.expected_reward, blob_reserve))
     {
       error_resp.code = CORE_RPC_ERROR_CODE_INTERNAL_ERROR;
       error_resp.message = "Internal error: failed to create block template";
